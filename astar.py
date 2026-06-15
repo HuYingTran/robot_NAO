@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-astar.py — A* pathfinding on a 2D grid (8-directional) with dynamic obstacle support.
+astar.py — D* Lite pathfinding on 2D grid (8-directional) with dynamic obstacle support.
+
+D* Lite is an incremental search algorithm that efficiently replans when the
+environment changes (e.g., dynamic obstacles appear/disappear). It searches
+backward from goal to start, maintaining g-values and rhs-values (one-step
+lookahead) for each visited node. When edge costs change, only affected
+vertices need to be updated, making replanning much faster than a full A* search.
 
 Features:
-  • Basic (static) A*: finds the shortest path on a grid with fixed obstacles.
-  • Dynamic obstacles (DynamicObstacle): appear/disappear over time (simulation steps).
-  • Replanning: when the robot detects a dynamic obstacle blocking the path ahead,
-    it automatically recalculates the route from its current position.
+  • D* Lite core: incremental search with efficient replanning
+  • Static obstacles: fixed obstacles on the grid
+  • Dynamic obstacles (DynamicObstacle): appear/disappear based on simulation step
+  • Replanning: when dynamic obstacles block the path, D* Lite efficiently
+    updates the path without re-searching from scratch
 
 Grid convention:
     grid[y][x] = 0  -> free cell
@@ -32,11 +39,11 @@ NEIGHBORS_8 = [
 
 
 # ===========================================================================
-# BASIC UTILITY FUNCTIONS
+# UTILITY FUNCTIONS
 # ===========================================================================
 
 def octile(a: Point, b: Point) -> float:
-    """Octile distance heuristic for 8-connected grids (admissible & consistent)."""
+    """Octile distance heuristic for 8-directional grid (admissible & consistent)."""
     dx = abs(a[0] - b[0])
     dy = abs(a[1] - b[1])
     return max(dx, dy) + (SQRT2 - 1) * min(dx, dy)
@@ -50,12 +57,12 @@ def in_bounds(grid: List[List[int]], p: Point) -> bool:
 
 
 def is_free(grid: List[List[int]], p: Point) -> bool:
-    """Check if cell p is free (not a static obstacle)."""
+    """Check if cell p is free (not a static obstacle) and in bounds."""
     return in_bounds(grid, p) and grid[p[1]][p[0]] == 0
 
 
 def inflate_obstacles(grid: List[List[int]], radius: int = 1) -> List[List[int]]:
-    """Inflate static obstacles by `radius` cells around them (safety margin for NAO)."""
+    """Inflate static obstacles by `radius` cells (safety margin for robot)."""
     h = len(grid)
     w = len(grid[0]) if h > 0 else 0
     inflated = [row[:] for row in grid]
@@ -71,13 +78,364 @@ def inflate_obstacles(grid: List[List[int]], radius: int = 1) -> List[List[int]]
 
 
 # ===========================================================================
-# BASIC A* (STATIC OBSTACLES)
+# D* LITE ALGORITHM
+# ===========================================================================
+
+class DLitePlanner:
+    """
+    D* Lite incremental pathfinding on a 2D grid (8-directional movement).
+
+    D* Lite searches backward from goal to start, maintaining:
+      - g(s): cost-to-go from state s to goal
+      - rhs(s): one-step lookahead of g(s)
+
+    When the environment changes (obstacles appear/disappear), only affected
+    vertices are updated, making replanning much faster than re-running A*.
+
+    Usage:
+        planner = DLitePlanner(grid, start, goal)
+        path = planner.plan()
+
+        # Later, when obstacles change:
+        planner.set_start(new_pos)
+        path = planner.replan()
+    """
+
+    INF = float('inf')
+
+    def __init__(self, grid: List[List[int]], start: Point, goal: Point,
+                 dynamic_mgr: 'DynamicObstacleManager' = None):
+        self.grid = grid
+        self.start = start
+        self.goal = goal
+        self.dynamic_mgr = dynamic_mgr
+
+        # D* Lite state
+        self.g: dict[Point, float] = {}
+        self.rhs: dict[Point, float] = {}
+        self._U: list = []          # priority queue (OPEN list)
+        self._U_set: set = set()    # track membership in U
+        self._U_counter: dict = {}  # track insertion counter per node (for stale detection)
+        self._counter = 0           # tie-breaker for heap
+        self.km = 0.0               # key modifier (accumulates on start changes)
+        self.last_stats: dict = {}  # stats from last computation
+        self._opened_count = 0      # count of U insertions
+
+        # Build dynamic-aware free-cell check
+        if dynamic_mgr is not None:
+            self._blocked = dynamic_mgr.get_blocked_cells()
+        else:
+            self._blocked = set()
+
+        # Initialize: g and rhs are implicitly INF (via dict.get default)
+        self.rhs[goal] = 0.0
+        self._insert(goal, self._key(goal))
+
+        # Initial computation
+        self.last_stats = self._compute_shortest_path()
+
+    def _is_free(self, p: Point) -> bool:
+        """Check if cell is free considering both static and dynamic obstacles."""
+        return is_free(self.grid, p) and p not in self._blocked
+
+    def _key(self, s: Point) -> Tuple[float, float]:
+        """
+        Compute priority key for state s.
+        k(s) = [min(g(s), rhs(s)) + h(start, s) + km,  min(g(s), rhs(s))]
+        """
+        g_val = self.g.get(s, self.INF)
+        rhs_val = self.rhs.get(s, self.INF)
+        v = min(g_val, rhs_val)
+        return (v + octile(self.start, s) + self.km, v)
+
+    def _insert(self, s: Point, key: Tuple[float, float]):
+        """Insert state s into priority queue U."""
+        self._counter += 1
+        heapq.heappush(self._U, (key, self._counter, s))
+        self._U_set.add(s)
+        self._U_counter[s] = self._counter  # track latest insertion counter
+
+    def _remove(self, s: Point):
+        """Mark state s as removed from U (lazy deletion)."""
+        self._U_set.discard(s)
+        self._U_counter.pop(s, None)
+
+    def _in_U(self, s: Point) -> bool:
+        """Check if state s is currently in U."""
+        return s in self._U_set
+
+    def _rhs(self, s: Point) -> float:
+        """
+        Compute rhs(s) = min over successors s' of [c(s, s') + g(s')].
+        For goal node, rhs = 0.
+        If s itself is blocked, rhs = INF (cannot traverse blocked cells).
+        """
+        if s == self.goal:
+            return 0.0
+        if not self._is_free(s):
+            return self.INF
+        sx, sy = s
+        best = self.INF
+        for dx, dy, step_cost in NEIGHBORS_8:
+            sp = (sx + dx, sy + dy)  # successor s'
+            if not self._is_free(sp):
+                continue
+            # Corner-cut check for diagonal moves
+            if dx != 0 and dy != 0:
+                if not self._is_free((sx + dx, sy)) or not self._is_free((sx, sy + dy)):
+                    continue
+            val = step_cost + self.g.get(sp, self.INF)
+            if val < best:
+                best = val
+        return best
+
+    def _update_vertex(self, u: Point):
+        """
+        Update vertex u: recompute rhs(u) and re-insert into U if inconsistent.
+        Also updates predecessors of u (neighbors that have u as successor).
+        """
+        if u != self.goal:
+            self.rhs[u] = self._rhs(u)
+
+        # Remove from U if present
+        if self._in_U(u):
+            self._remove(u)
+
+        # If inconsistent, insert into U
+        g_val = self.g.get(u, self.INF)
+        rhs_val = self.rhs.get(u, self.INF)
+        if g_val != rhs_val:
+            self._insert(u, self._key(u))
+            self._opened_count += 1
+
+    def _compute_shortest_path(self) -> dict:
+        """
+        Main D* Lite loop. Processes the priority queue until the start
+        state is locally consistent and its key is <= top of queue.
+
+        Returns stats dict with expanded/opened/time_ms.
+        """
+        import time
+        t0 = time.perf_counter()
+        stats = {"expanded": 0, "opened": 0, "time_ms": 0.0}
+        self._opened_count = 0  # reset insertion counter
+
+        while self._U:
+            # Clean stale entries (lazy deletion):
+            # Skip entries that are not in U_set, or have a non-matching
+            # counter (superseded by a later re-insertion)
+            while self._U:
+                top_key, top_counter, top_s = self._U[0]
+                if top_s in self._U_set and self._U_counter.get(top_s) == top_counter:
+                    break
+                heapq.heappop(self._U)
+            else:
+                break
+
+            top_key, top_counter, top_s = self._U[0]
+            u = top_s
+            k_old = top_key
+
+            # Check termination: start is consistent and key(start) <= k_top
+            g_start = self.g.get(self.start, self.INF)
+            rhs_start = self.rhs.get(self.start, self.INF)
+            if g_start == rhs_start and self._key(self.start) <= k_old:
+                break
+
+            heapq.heappop(self._U)
+            self._remove(u)
+
+            stats["expanded"] += 1
+
+            g_u = self.g.get(u, self.INF)
+            rhs_u = self.rhs.get(u, self.INF)
+
+            if k_old < self._key(u):
+                # Key increased — re-insert with updated key
+                self._insert(u, self._key(u))
+                stats["opened"] += 1
+
+            elif g_u > rhs_u:
+                # Locally overconsistent: lower g to rhs, expand
+                self.g[u] = rhs_u
+                self._update_vertex(u)
+                # Update all predecessors (neighbors of u)
+                ux, uy = u
+                for dx, dy, step_cost in NEIGHBORS_8:
+                    s = (ux - dx, uy - dy)  # predecessor
+                    if not self._is_free(s):
+                        continue
+                    # Corner-cut check: move from s to u
+                    if dx != 0 and dy != 0:
+                        if not self._is_free((s[0] + dx, s[1])) or \
+                           not self._is_free((s[0], s[1] + dy)):
+                            continue
+                    self._update_vertex(s)
+
+            else:
+                # Locally underconsistent: raise g to INF, propagate
+                self.g[u] = self.INF
+                self._update_vertex(u)
+                ux, uy = u
+                for dx, dy, step_cost in NEIGHBORS_8:
+                    s = (ux - dx, uy - dy)  # predecessor
+                    if not self._is_free(s):
+                        continue
+                    if dx != 0 and dy != 0:
+                        if not self._is_free((s[0] + dx, s[1])) or \
+                           not self._is_free((s[0], s[1] + dy)):
+                            continue
+                    self._update_vertex(s)
+
+        stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
+        stats["opened"] = self._opened_count
+        return stats
+
+    def get_path(self) -> Optional[List[Point]]:
+        """
+        Extract the current best path from start to goal using g-values.
+
+        Starting from start, repeatedly select the neighbor s' that minimizes
+        c(current, s') + g(s'), until reaching the goal.
+
+        Returns path as list of Points, or None if no path exists.
+        """
+        if not self._is_free(self.start) or not self._is_free(self.goal):
+            return None
+        if self.start == self.goal:
+            return [self.start]
+        if self.g.get(self.start, self.INF) == self.INF:
+            return None
+
+        path = [self.start]
+        current = self.start
+        visited = {current}  # prevent infinite loops
+
+        while current != self.goal:
+            cx, cy = current
+            best_cost = self.INF
+            best_next = None
+
+            for dx, dy, step_cost in NEIGHBORS_8:
+                s = (cx + dx, cy + dy)
+                if not self._is_free(s) or s in visited:
+                    continue
+                if dx != 0 and dy != 0:
+                    if not self._is_free((cx + dx, cy)) or \
+                       not self._is_free((cx, cy + dy)):
+                        continue
+                val = step_cost + self.g.get(s, self.INF)
+                if val < best_cost:
+                    best_cost = val
+                    best_next = s
+
+            if best_next is None:
+                return None  # stuck — no path to goal
+            visited.add(best_next)
+            path.append(best_next)
+            current = best_next
+
+        return path
+
+    def set_start(self, new_start: Point):
+        """
+        Update the start position (e.g., after the robot moves).
+        Adjusts km and re-queues the old start for re-evaluation.
+        """
+        if new_start != self.start:
+            g_start = self.g.get(self.start, self.INF)
+            rhs_start = self.rhs.get(self.start, self.INF)
+            self.km += min(g_start, rhs_start) + octile(self.start, new_start)
+            old_start = self.start
+            self.start = new_start
+            # Reset g of old start to force re-exploration if needed
+            self.g[old_start] = self.INF
+            self._update_vertex(old_start)
+
+    def update_obstacles(self):
+        """
+        Call when dynamic obstacles have changed. Refreshes the blocked
+        cell set and updates all affected vertices, then rebuilds the
+        priority queue to eliminate stale entries.
+        """
+        if self.dynamic_mgr is not None:
+            new_blocked = self.dynamic_mgr.get_blocked_cells()
+        else:
+            new_blocked = set()
+
+        # Find cells whose blocked status changed
+        changed = self._blocked.symmetric_difference(new_blocked)
+        self._blocked = new_blocked
+
+        # Collect all affected cells: changed cells + their neighbors
+        affected = set()
+        for p in changed:
+            affected.add(p)
+            px, py = p
+            for dx, dy, _ in NEIGHBORS_8:
+                affected.add((px - dx, py - dy))  # predecessors
+                affected.add((px + dx, py + dy))  # successors
+
+        # For newly blocked cells, invalidate g immediately
+        for s in changed:
+            if not self._is_free(s) and s != self.goal:
+                self.g[s] = self.INF
+
+        # Update all affected vertices
+        for s in affected:
+            self._update_vertex(s)
+
+        # Rebuild priority queue from scratch to eliminate all stale entries
+        self._U = []
+        self._U_set = set()
+        self._U_counter = {}
+        self._counter = 0
+        for s in list(self.rhs.keys()) + list(self.g.keys()):
+            g_val = self.g.get(s, self.INF)
+            rhs_val = self.rhs.get(s, self.INF)
+            if g_val != rhs_val and s not in self._U_set:
+                self._insert(s, self._key(s))
+
+    def replan(self) -> Optional[List[Point]]:
+        """
+        Replan after environment changes. Re-runs ComputeShortestPath
+        incrementally. If incremental replan fails to find a valid path
+        (due to uncomputed g-values in detour regions), falls back to
+        full recomputation.
+
+        Returns the new path or None if no path exists.
+        """
+        self._compute_shortest_path()
+        path = self.get_path()
+        if path is not None:
+            return path
+
+        # Incremental replan failed — fall back to full recomputation.
+        # Reset state and rebuild from scratch.
+        self.g = {}
+        self.rhs = {}
+        self._U = []
+        self._U_set = set()
+        self._U_counter = {}
+        self._counter = 0
+        self._opened_count = 0
+        self.km = 0.0
+
+        # Re-initialize D* Lite
+        self.rhs[self.goal] = 0.0
+        self._insert(self.goal, self._key(self.goal))
+        self.last_stats = self._compute_shortest_path()
+        return self.get_path()
+
+
+# ===========================================================================
+# BACKWARD-COMPATIBLE WRAPPER FUNCTIONS (using D* Lite internally)
 # ===========================================================================
 
 def astar(grid: List[List[int]], start: Point, goal: Point) -> Optional[List[Point]]:
     """
-    Run A* from start -> goal on a static grid.
-    Returns a list of points (including start and goal) or None if no path exists.
+    Find shortest path from start to goal on static grid using D* Lite.
+    Returns list of Points (including start and goal) or None if no path.
     """
     path, _ = astar_with_stats(grid, start, goal)
     return path
@@ -87,7 +445,7 @@ def astar_with_stats(
     grid: List[List[int]], start: Point, goal: Point
 ) -> Tuple[Optional[List[Point]], dict]:
     """
-    Static A* with stats: expanded (closed set), opened, time_ms.
+    D* Lite pathfinding with statistics: expanded, opened, time_ms.
     """
     import time
     t0 = time.perf_counter()
@@ -100,58 +458,69 @@ def astar_with_stats(
         stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
         return [start], stats
 
-    open_heap: List[Tuple[float, int, Point]] = []
-    counter = 0
-    heapq.heappush(open_heap, (octile(start, goal), counter, start))
-    stats["opened"] += 1
+    planner = DLitePlanner(grid, start, goal)
+    path = planner.get_path()
 
-    came_from: dict[Point, Point] = {}
-    g_score: dict[Point, float] = {start: 0.0}
-    closed: set[Point] = set()
+    # Get stats from planner's internal computation
+    stats["expanded"] = planner.last_stats.get("expanded", 0)
+    stats["opened"] = planner.last_stats.get("opened", 0)
+    stats["time_ms"] = planner.last_stats.get("time_ms", 0.0)
 
-    while open_heap:
-        _, _, current = heapq.heappop(open_heap)
-        if current in closed:
-            continue
-        if current == goal:
-            stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
-            return _reconstruct(came_from, current), stats
-        closed.add(current)
-        stats["expanded"] += 1
-
-        cx, cy = current
-        for dx, dy, step_cost in NEIGHBORS_8:
-            nx, ny = cx + dx, cy + dy
-            neighbor = (nx, ny)
-            if neighbor in closed or not is_free(grid, neighbor):
-                continue
-            if dx != 0 and dy != 0:
-                if not is_free(grid, (cx + dx, cy)) or not is_free(grid, (cx, cy + dy)):
-                    continue
-            tentative_g = g_score[current] + step_cost
-            if tentative_g < g_score.get(neighbor, float('inf')):
-                came_from[neighbor] = current
-                g_score[neighbor] = tentative_g
-                f = tentative_g + octile(neighbor, goal)
-                counter += 1
-                heapq.heappush(open_heap, (f, counter, neighbor))
-                stats["opened"] += 1
-    stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
-    return None, stats
+    return path, stats
 
 
-def _reconstruct(came_from: dict[Point, Point], current: Point) -> List[Point]:
-    """Reconstruct path from goal back to start."""
-    path = [current]
-    while current in came_from:
-        current = came_from[current]
-        path.append(current)
-    path.reverse()
+def astar_dynamic(grid: List[List[int]], start: Point, goal: Point,
+                  dynamic_mgr: 'DynamicObstacleManager' = None) -> Optional[List[Point]]:
+    """
+    D* Lite pathfinding from start to goal, considering both static and
+    dynamic obstacles. If dynamic_mgr=None, behaves like regular D* Lite.
+    """
+    path, _ = astar_dynamic_with_stats(grid, start, goal, dynamic_mgr)
     return path
 
 
+def astar_dynamic_with_stats(
+    grid: List[List[int]], start: Point, goal: Point,
+    dynamic_mgr: 'DynamicObstacleManager' = None
+) -> Tuple[Optional[List[Point]], dict]:
+    """
+    D* Lite with dynamic obstacles, returns (path, stats).
+    Blocked cells = static obstacles OR active dynamic obstacles.
+    """
+    import time
+    t0 = time.perf_counter()
+    stats = {"expanded": 0, "opened": 0, "time_ms": 0.0}
+
+    blocked = dynamic_mgr.get_blocked_cells() if dynamic_mgr else set()
+
+    def _is_free_dyn(p: Point) -> bool:
+        """Check if cell is free (static + dynamic)."""
+        if not is_free(grid, p):
+            return False
+        if p in blocked:
+            return False
+        return True
+
+    if not _is_free_dyn(start) or not _is_free_dyn(goal):
+        stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
+        return None, stats
+    if start == goal:
+        stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
+        return [start], stats
+
+    planner = DLitePlanner(grid, start, goal, dynamic_mgr)
+    path = planner.get_path()
+
+    # Get stats from planner's internal computation
+    stats["expanded"] = planner.last_stats.get("expanded", 0)
+    stats["opened"] = planner.last_stats.get("opened", 0)
+    stats["time_ms"] = planner.last_stats.get("time_ms", 0.0)
+
+    return path, stats
+
+
 def path_length(path: Optional[List[Point]]) -> float:
-    """Compute total geometric length of the path. Returns Inf if path=None."""
+    """Compute total geometric length of a path. Returns inf if path=None."""
     if path is None or len(path) < 2:
         return float('inf') if path is None else 0.0
     total = 0.0
@@ -163,69 +532,6 @@ def path_length(path: Optional[List[Point]]) -> float:
     return total
 
 
-def is_line_of_sight_clear(grid: List[List[int]], p1: Point, p2: Point) -> bool:
-    """
-    Check if a straight line between p1 and p2 is obstacle-free.
-    Uses Bresenham's line algorithm for grid-based line-of-sight.
-    """
-    x0, y0 = p1
-    x1, y1 = p2
-    dx = abs(x1 - x0)
-    dy = abs(y1 - y0)
-    sx = 1 if x0 < x1 else -1
-    sy = 1 if y0 < y1 else -1
-    err = dx - dy
-
-    x, y = x0, y0
-    while True:
-        if not is_free(grid, (x, y)):
-            return False
-        if (x, y) == (x1, y1):
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            x += sx
-        if e2 < dx:
-            err += dx
-            y += sy
-    return True
-
-
-def smooth_path(grid: List[List[int]], path: List[Point]) -> List[Point]:
-    """
-    Smooth an A* path by removing unnecessary waypoints.
-    Uses greedy shortcutting: if two non-consecutive waypoints have clear
-    line-of-sight, skip all intermediate waypoints.
-    
-    This reduces the number of direction changes, making robot movement
-    more fluid and reducing inertia effects.
-    
-    Args:
-        grid: static obstacle grid
-        path: original A* path (must include start and goal)
-    
-    Returns:
-        Smoothed path with fewer waypoints but same start and goal.
-    """
-    if len(path) <= 2:
-        return path[:]
-    
-    smoothed = [path[0]]  # Start with the first point
-    current_idx = 0
-    
-    while current_idx < len(path) - 1:
-        # Try to find the farthest point visible from current_idx
-        best_idx = current_idx + 1
-        for test_idx in range(current_idx + 2, len(path)):
-            if is_line_of_sight_clear(grid, path[current_idx], path[test_idx]):
-                best_idx = test_idx
-        smoothed.append(path[best_idx])
-        current_idx = best_idx
-    
-    return smoothed
-
-
 # ===========================================================================
 # DYNAMIC OBSTACLES
 # ===========================================================================
@@ -234,9 +540,9 @@ def smooth_path(grid: List[List[int]], path: List[Point]) -> List[Point]:
 class DynamicObstacle:
     """
     A dynamic obstacle on the grid.
-    - position: (x, y) coordinates
-    - appear_step: simulation step when it first appears
-    - duration: number of steps it stays active (-1 = permanent)
+    - position: coordinates (x, y)
+    - appear_step: simulation step when it appears
+    - duration: number of steps it persists (-1 = permanent)
     - active: current state
     """
     position: Point
@@ -245,7 +551,7 @@ class DynamicObstacle:
     active: bool = False
 
     def is_active_at(self, step: int) -> bool:
-        """Check if obstacle is active at the given step."""
+        """Check if obstacle is active at given simulation step."""
         if step < self.appear_step:
             return False
         if self.duration == -1:
@@ -258,9 +564,9 @@ class DynamicObstacleManager:
     """
     Manages a collection of dynamic obstacles.
     - Add/remove obstacles
-    - Update state per simulation step
-    - Check if a cell is blocked
-    - Randomly spawn obstacles during simulation
+    - Update state based on simulation step
+    - Check blocked cells
+    - Spawn random obstacles during simulation
     """
     obstacles: List[DynamicObstacle] = field(default_factory=list)
     _blocked_cells: Set[Point] = field(default_factory=set)
@@ -275,7 +581,7 @@ class DynamicObstacleManager:
         self._blocked_cells.clear()
 
     def update(self, current_step: int):
-        """Update the state of all obstacles for the current step."""
+        """Update all obstacle states based on current simulation step."""
         self._blocked_cells.clear()
         for obs in self.obstacles:
             obs.active = obs.is_active_at(current_step)
@@ -287,11 +593,11 @@ class DynamicObstacleManager:
         return point in self._blocked_cells
 
     def get_blocked_cells(self) -> Set[Point]:
-        """Return the set of currently blocked cells."""
+        """Return the set of cells currently blocked by dynamic obstacles."""
         return self._blocked_cells.copy()
 
     def get_active_obstacles(self) -> List[DynamicObstacle]:
-        """Return a list of currently active obstacles."""
+        """Return list of currently active obstacles."""
         return [obs for obs in self.obstacles if obs.active]
 
     def spawn_random(self, grid: List[List[int]], current_step: int,
@@ -299,10 +605,10 @@ class DynamicObstacleManager:
                      avoid_cells: Set[Point] = None,
                      seed: int = None):
         """
-        Randomly spawn `count` dynamic obstacles on free cells.
+        Spawn random dynamic obstacles on free cells.
         - grid: static grid
-        - current_step: current step (obstacle appears immediately)
-        - duration: number of steps the obstacle persists
+        - current_step: step at which obstacles appear (immediate)
+        - duration: number of steps they persist
         - avoid_cells: cells to avoid (robot position, pickup/dropoff)
         """
         h = len(grid)
@@ -334,27 +640,25 @@ class DynamicObstacleManager:
                       avoid_cells: Set[Point] = None,
                       min_ahead: int = 3, max_ahead: int = 8):
         """
-        Spawn a dynamic obstacle DIRECTLY on the path ahead of the robot.
-        Forces the robot to recalculate its route.
+        Spawn a dynamic obstacle directly on the path ahead of the robot.
+        Forces the robot to replan its route.
 
         Args:
-            path: current path
-            current_index: robot's current position index on the path
+            path: current planned path
+            current_index: robot's current position index on path
             current_step: current simulation step
-            duration: number of steps the obstacle persists
-            avoid_cells: cells to avoid (pickup/dropoff waypoints)
+            duration: number of steps obstacle persists
+            avoid_cells: cells to avoid (waypoint pickup/dropoff)
             min_ahead: minimum distance ahead to place obstacle
             max_ahead: maximum distance ahead to place obstacle
 
         Returns:
-            The spawned DynamicObstacle, or None if no suitable position found.
+            The spawned DynamicObstacle, or None if no valid position found.
         """
         avoid = avoid_cells or set()
-        # Find cells on the path ahead (in range min_ahead..max_ahead)
         start_idx = current_index + min_ahead
         end_idx = min(current_index + max_ahead, len(path))
 
-        # Candidate list: path cells that are not blocked and not in avoid set
         candidates = []
         for i in range(start_idx, end_idx):
             p = path[i]
@@ -364,7 +668,6 @@ class DynamicObstacleManager:
         if not candidates:
             return None
 
-        # Randomly pick one cell from candidates
         chosen = _random.choice(candidates)
         obs = DynamicObstacle(
             position=chosen,
@@ -378,89 +681,7 @@ class DynamicObstacleManager:
 
 
 # ===========================================================================
-# A* WITH DYNAMIC OBSTACLES
-# ===========================================================================
-
-def astar_dynamic(grid: List[List[int]], start: Point, goal: Point,
-                  dynamic_mgr: DynamicObstacleManager = None) -> Optional[List[Point]]:
-    """
-    A* from start -> goal, considering both static and dynamic obstacles.
-    If dynamic_mgr=None, behaves like standard A*.
-    """
-    path, _ = astar_dynamic_with_stats(grid, start, goal, dynamic_mgr)
-    return path
-
-
-def astar_dynamic_with_stats(
-    grid: List[List[int]], start: Point, goal: Point,
-    dynamic_mgr: DynamicObstacleManager = None
-) -> Tuple[Optional[List[Point]], dict]:
-    """
-    A* with dynamic obstacles, returns (path, stats).
-    Blocked cell = static obstacle OR currently active dynamic obstacle.
-    """
-    import time
-    t0 = time.perf_counter()
-    stats = {"expanded": 0, "opened": 0, "time_ms": 0.0}
-
-    def _is_free_dyn(p: Point) -> bool:
-        """Check if cell is free (static + dynamic)."""
-        if not is_free(grid, p):
-            return False
-        if dynamic_mgr and dynamic_mgr.is_blocked(p):
-            return False
-        return True
-
-    if not _is_free_dyn(start) or not _is_free_dyn(goal):
-        stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
-        return None, stats
-    if start == goal:
-        stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
-        return [start], stats
-
-    open_heap: List[Tuple[float, int, Point]] = []
-    counter = 0
-    heapq.heappush(open_heap, (octile(start, goal), counter, start))
-    stats["opened"] += 1
-
-    came_from: dict[Point, Point] = {}
-    g_score: dict[Point, float] = {start: 0.0}
-    closed: set[Point] = set()
-
-    while open_heap:
-        _, _, current = heapq.heappop(open_heap)
-        if current in closed:
-            continue
-        if current == goal:
-            stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
-            return _reconstruct(came_from, current), stats
-        closed.add(current)
-        stats["expanded"] += 1
-
-        cx, cy = current
-        for dx, dy, step_cost in NEIGHBORS_8:
-            nx, ny = cx + dx, cy + dy
-            neighbor = (nx, ny)
-            if neighbor in closed or not _is_free_dyn(neighbor):
-                continue
-            # Check corner-cutting for diagonal moves
-            if dx != 0 and dy != 0:
-                if not _is_free_dyn((cx + dx, cy)) or not _is_free_dyn((cx, cy + dy)):
-                    continue
-            tentative_g = g_score[current] + step_cost
-            if tentative_g < g_score.get(neighbor, float('inf')):
-                came_from[neighbor] = current
-                g_score[neighbor] = tentative_g
-                f = tentative_g + octile(neighbor, goal)
-                counter += 1
-                heapq.heappush(open_heap, (f, counter, neighbor))
-                stats["opened"] += 1
-    stats["time_ms"] = (time.perf_counter() - t0) * 1000.0
-    return None, stats
-
-
-# ===========================================================================
-# REPLANNING — Recalculate path when hitting dynamic obstacles
+# REPLANNING — Replan path when encountering dynamic obstacles
 # ===========================================================================
 
 def check_path_blocked(path: List[Point], current_index: int,
@@ -468,11 +689,11 @@ def check_path_blocked(path: List[Point], current_index: int,
                        look_ahead: int = 10) -> Optional[int]:
     """
     Check if the path ahead is blocked by dynamic obstacles.
-    - path: full path
+    - path: full planned path
     - current_index: robot's current position index
     - look_ahead: number of cells to check ahead
 
-    Returns: the first blocked index (None if path ahead is clear).
+    Returns: index of first blocked cell (None if path is clear ahead).
     """
     if dynamic_mgr is None:
         return None
@@ -486,7 +707,8 @@ def check_path_blocked(path: List[Point], current_index: int,
 def replan_segment(grid: List[List[int]], current_pos: Point, goal: Point,
                    dynamic_mgr: DynamicObstacleManager) -> Optional[List[Point]]:
     """
-    Recalculate path segment from current position -> goal, avoiding dynamic obstacles.
+    Replan path segment from current position to goal, avoiding dynamic obstacles.
+    Uses D* Lite for efficient incremental search.
     """
     return astar_dynamic(grid, current_pos, goal, dynamic_mgr)
 
@@ -495,17 +717,17 @@ def replan_full_path(grid: List[List[int]], current_pos: Point,
                      remaining_waypoints: List[Point],
                      dynamic_mgr: DynamicObstacleManager) -> Optional[List[Point]]:
     """
-    Recalculate the full path from current position through remaining waypoints.
-    Concatenates A* segments (avoiding dynamic obstacles).
+    Replan the full path from current position through remaining waypoints.
+    Uses D* Lite for each segment, avoiding dynamic obstacles.
 
     Args:
         grid: static obstacle grid
         current_pos: robot's current position
-        remaining_waypoints: list of waypoints not yet visited
+        remaining_waypoints: list of waypoints still to visit
         dynamic_mgr: dynamic obstacle manager
 
     Returns:
-        Full path or None if no path can be found.
+        Complete path or None if any segment has no solution.
     """
     if not remaining_waypoints:
         return [current_pos]
@@ -518,8 +740,80 @@ def replan_full_path(grid: List[List[int]], current_pos: Point,
         if segment is None:
             return None
         if full_path:
-            segment = segment[1:]  # Skip duplicate start point
+            segment = segment[1:]  # skip duplicate start point
         full_path.extend(segment)
         prev = wp
 
     return full_path
+
+
+# ===========================================================================
+# PATH SMOOTHING — Convert sharp grid turns into smooth Bezier curves
+# ===========================================================================
+
+def smooth_path(path: List[Point], radius: float = 0.4,
+                samples: int = 8) -> List[Tuple[float, float]]:
+    """
+    Convert a grid path with sharp corners into a smooth curve path.
+
+    At each interior corner, replaces the sharp turn with a quadratic Bezier
+    curve.  Straight segments are left unchanged.
+
+    Args:
+        path: list of integer grid points [(x, y), ...]
+        radius: how far before/after each corner to start rounding (0 < r < 0.5)
+        samples: number of curve sample points per corner
+
+    Returns:
+        List of (float, float) points suitable for matplotlib plotting.
+    """
+    if len(path) < 2:
+        return [(float(p[0]), float(p[1])) for p in path]
+
+    r = min(max(radius, 0.01), 0.49)
+    result: List[Tuple[float, float]] = []
+
+    # Always include the first point
+    result.append((float(path[0][0]), float(path[0][1])))
+
+    for i in range(1, len(path) - 1):
+        prev = path[i - 1]
+        curr = path[i]
+        nxt = path[i + 1]
+
+        # Direction vectors
+        dx1 = float(curr[0] - prev[0])
+        dy1 = float(curr[1] - prev[1])
+        dx2 = float(nxt[0] - curr[0])
+        dy2 = float(nxt[1] - curr[1])
+
+        # Cross product → detect corners (0 = collinear)
+        cross = abs(dx1 * dy2 - dy1 * dx2)
+
+        if cross < 0.01:
+            # Straight line — keep original point
+            result.append((float(curr[0]), float(curr[1])))
+        else:
+            # Corner — insert quadratic Bezier curve
+            # P0: entry point (radius before corner)
+            p0x = curr[0] - r * dx1
+            p0y = curr[1] - r * dy1
+            # P1: control point (the corner itself)
+            p1x = float(curr[0])
+            p1y = float(curr[1])
+            # P2: exit point (radius after corner)
+            p2x = curr[0] + r * dx2
+            p2y = curr[1] + r * dy2
+
+            # Sample the quadratic Bezier: B(t) = (1-t)^2*P0 + 2t(1-t)*P1 + t^2*P2
+            for j in range(1, samples + 1):
+                t = j / samples
+                t1 = 1.0 - t
+                bx = t1 * t1 * p0x + 2.0 * t1 * t * p1x + t * t * p2x
+                by = t1 * t1 * p0y + 2.0 * t1 * t * p1y + t * t * p2y
+                result.append((bx, by))
+
+    # Always include the last point
+    result.append((float(path[-1][0]), float(path[-1][1])))
+
+    return result

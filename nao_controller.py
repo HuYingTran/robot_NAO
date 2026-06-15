@@ -12,7 +12,7 @@ API:
     ctrl = NaoController(cell_size_m=0.10, walk_speed=0.5)
     ok, msg = ctrl.connect(ip="192.168.1.10", port=9559)
     ctrl.stand_init()
-    ctrl.say("Starting delivery")
+    ctrl.say("Bắt đầu giao hàng")
     ctrl.follow_path_cells(path, on_progress=lambda i, n: ...)
     ctrl.disconnect()
 """

@@ -1,410 +1,407 @@
-# Tối Ưu Hóa Lộ Trình Giao Hàng Cho Robot NAO Trong Môi Trường Có Vật Cản Sử Dụng Thuật Toán Di Truyền Và A*
+# Tối Ưu Hóa Lộ Trình Giao Hàng Cho Robot NAO Trong Môi Trường Có Vật Cản Sử Dụng Thuật Toán Di Truyền Và D* Lite
 
-**Optimizing Delivery Routes for NAO Robot in Obstacle-Laden Environments Using Genetic Algorithm and A***
+**Optimizing Delivery Routes for NAO Robot in Obstacle Environments Using Genetic Algorithm and D* Lite Incremental Path Planning**
 
----
+**Tóm tắt —** Bài báo trình bày hệ thống tự động hóa nhiệm vụ giao hàng cho robot NAO trong môi trường trong nhà có vật cản tĩnh và động. Hệ thống tích hợp hai lớp lập kế hoạch: (1) Thuật toán Di Truyền (GA) để tối ưu hóa chuỗi lấy–giao hàng nhằm tối thiểu tổng quãng đường; (2) D* Lite cho lập kế hoạch đường đi tăng dần (incremental path planning) với khả năng tái lập kế hoạch hiệu quả khi phát sinh vật cản động. Đường đi được làm mượt bằng đường cong Bézier bậc hai tại các góc cua, giảm dao động quán tính cho robot. Thực nghiệm trên môi trường mô phỏng và phần cứng NAO thực tế xác nhận hệ thống giảm 23,4% quãng đường so với ngẫu nhiên, 11,2% so với tham lam, đồng thời tái lập kế hoạch nhanh hơn 5–8 lần so với tính toán lại từ đầu.
 
-**Tóm tắt —** Bài báo trình bày một hệ thống tự động hóa nhiệm vụ giao hàng cho robot NAO trong môi trường trong nhà có vật cản tĩnh. Hệ thống tích hợp hai lớp lập kế hoạch: (1) lớp kế hoạch nhiệm vụ cấp cao sử dụng Thuật toán Di Truyền (Genetic Algorithm – GA) để tìm chuỗi lấy hàng – giao hàng tối ưu nhằm tối thiểu hóa tổng quãng đường di chuyển; (2) lớp lập kế hoạch đường đi cấp thấp sử dụng thuật toán A* để tìm đường tránh vật cản giữa từng cặp điểm trên bản đồ lưới. Thực nghiệm trên môi trường mô phỏng và trên phần cứng robot NAO thực tế cho thấy hệ thống đề xuất giảm tổng quãng đường di chuyển trung bình 23,4% so với chiến lược lập kế hoạch ngẫu nhiên và 11,2% so với giải thuật tham lam (greedy). Kết quả xác nhận tính khả thi của việc triển khai trên robot NAO với hệ điều hành NAOqi.
+**Từ khóa —** Robot NAO, thuật toán di truyền, D* Lite, lập kế hoạch tăng dần, làm mượt đường đi, tránh vật cản động.
 
-**Từ khóa —** Robot NAO, thuật toán di truyền, thuật toán A*, lập kế hoạch đường đi, tránh vật cản, tối ưu hóa lộ trình.
-
----
+<!-- columns -->
 
 ## I. GIỚI THIỆU
 
-Sự phát triển của robot dịch vụ trong môi trường trong nhà (indoor service robots) đặt ra yêu cầu ngày càng cao về khả năng lập kế hoạch nhiệm vụ tự động và di chuyển an toàn. Robot NAO (Aldebaran/SoftBank Robotics) là một nền tảng robot hình người (humanoid) phổ biến trong nghiên cứu học thuật và ứng dụng thực tế, được trang bị nhiều cảm biến và hỗ trợ lập trình qua hệ điều hành NAOqi [1].
+Sự phát triển của robot dịch vụ trong nhà đặt ra yêu cầu ngày càng cao về lập kế hoạch nhiệm vụ tự động và di chuyển an toàn. Robot NAO (SoftBank Robotics) là nền tảng humanoid phổ biến trong nghiên cứu, được trang bị nhiều cảm biến và hỗ trợ lập trình qua NAOqi [1].
 
-Bài toán giao hàng (delivery problem) trên robot đòi hỏi giải quyết đồng thời hai bài toán con: (i) xác định **thứ tự** lấy hàng và giao hàng tối ưu — một dạng bài toán TSP với ràng buộc thứ tự (Pickup and Delivery Problem – PDP) [2]; (ii) tìm **đường đi** tránh vật cản trong thời gian thực giữa các cặp điểm trên bản đồ [3].
+Bài toán giao hàng (Pickup-and-Delivery Problem – PDP) trên robot đòi hỏi giải quyết đồng thời hai bài toán con: (i) xác định thứ tự lấy–giao tối ưu — dạng NP-hard của TSP có ràng buộc [2]; (ii) tìm đường tránh vật cản giữa các cặp điểm trên bản đồ lưới [3].
 
-Thuật toán Di Truyền (GA) đã được chứng minh là phù hợp để giải các bài toán tổ hợp NP-hard như TSP/PDP nhờ khả năng tìm kiếm toàn cục hiệu quả [4]. Trong khi đó, A* là thuật toán tìm đường kinh điển đảm bảo tính tối ưu và đầy đủ trên đồ thị hữu hạn [5]. Việc kết hợp hai thuật toán này tạo nên kiến trúc phân cấp hai tầng linh hoạt và hiệu quả.
+GA phù hợp cho bài toán tổ hợp NP-hard nhờ khả năng tìm kiếm toàn cục [4]. D* Lite [8] là thuật toán tìm đường tăng dần, kế thừa A* nhưng duy trì cấu trúc g-value/rhs-value cho phép tái lập kế hoạch hiệu quả khi vật cản thay đổi — phù hợp với môi trường thực tế có vật cản động xuất hiện bất ngờ.
 
-Đóng góp chính của bài báo:
-- Xây dựng mô hình bài toán PDP cho robot NAO với tích hợp bản đồ lưới.
-- Thiết kế toán tử GA chuyên biệt tôn trọng ràng buộc thứ tự lấy/giao hàng.
-- Triển khai A* trên bản đồ lưới 2D kết hợp với mô hình động học của NAO.
-- Đánh giá thực nghiệm trên mô phỏng và phần cứng thực.
-
----
+Đóng góp chính:
+- Mô hình PDP cho NAO tích hợp bản đồ lưới với vùng lạm phát C-space (Configuration Space inflation).
+- Toán tử GA chuyên biệt OX-PR tôn trọng ràng buộc thứ tự lấy/giao.
+- D* Lite với tái lập kế hoạch tăng dần và làm mượt đường đi bằng Bézier.
+- Đánh giá thực nghiệm trên mô phỏng 100×100 và phần cứng NAO thực tế.
 
 ## II. CÔNG TRÌNH LIÊN QUAN
 
-### A. Lập kế hoạch nhiệm vụ cho robot dịch vụ
+### A. Lập kế hoạch nhiệm vụ cho robot
 
-Li và cộng sự [6] đề xuất giải thuật GA lai ghép để giải bài toán định tuyến robot giao hàng trong bệnh viện, đạt được kết quả tốt hơn 18% so với phương pháp truyền thống. Tuy nhiên, công trình này không xem xét việc tránh vật cản động.
+Li và cộng sự [6] đề xuất GA lai ghép cho định tuyến robot giao hàng bệnh viện, tốt hơn 18% so với truyền thống nhưng không xét vật cản động. Chen và Wang [7] dùng PSO cho robot kho hàng nhưng hội tụ chậm khi số lượng mặt hàng tăng.
 
-Chen và Wang [7] sử dụng thuật toán tối ưu bầy đàn (PSO) kết hợp với đồ thị đường đi (roadmap) cho robot di động trong kho hàng. Phương pháp này có tốc độ hội tụ chậm khi số lượng mặt hàng tăng.
+### B. Lập kế hoạch đường đi
 
-### B. Lập kế hoạch đường đi tránh vật cản
+Hart và cộng sự [5] phân tích A* với đảm bảo tối ưu khi heuristic admissible. Likhachev và cộng sự [8] đề xuất D* Lite cho môi trường thay đổi động, duy trì g-value và rhs-value để tái lập kế hoạch mà không cần tính lại từ đầu. Ferguson và Stentz [9] mở rộng Field D* cho không gian liên tục.
 
-Thuật toán A* được phân tích chi tiết bởi Hart và cộng sự [5] với đảm bảo tìm đường đi ngắn nhất khi hàm heuristic là admissible. Likhachev và cộng sự [8] đề xuất D* Lite cho môi trường thay đổi động, trong khi Ferguson và Stentz [9] mở rộng A* cho không gian liên tục.
-
-Đối với robot NAO cụ thể, Gouaillier và cộng sự [10] mô tả hệ thống di chuyển hai chân và các ràng buộc động học liên quan, đây là yếu tố quan trọng khi lập kế hoạch đường đi cho robot hình người.
+Gouaillier và cộng sự [10] mô tả hệ thống di chuyển NAO và các ràng buộc động học, yếu tố quan trọng khi thiết kế đường đi cho humanoid.
 
 ### C. Khoảng trống nghiên cứu
 
-Chưa có công trình nào tích hợp GA và A* một cách hệ thống cho robot NAO trong bài toán giao hàng với môi trường lưới 2D. Bài báo này lấp đầy khoảng trống đó.
-
----
+Chưa có công trình tích hợp GA + D* Lite cho NAO trong bài toán giao hàng với tái lập kế hoạch động và làm mượt đường đi. Bài báo lấp đầy khoảng trống này.
 
 ## III. PHÁT BIỂU BÀI TOÁN
 
 ### A. Mô hình môi trường
 
-Môi trường được biểu diễn bằng bản đồ lưới (grid map) \(G = (V, E)\) kích thước \(M \times N\), trong đó:
-- \(V\): tập hợp các ô (cell) \(v_{i,j}\) với \(1 \le i \le M\), \(1 \le j \le N\).
-- Mỗi ô có trạng thái: **tự do** (free) hoặc **bị chiếm** (occupied) bởi vật cản.
-- \(E\): các cạnh nối giữa hai ô tự do kề nhau theo 8 hướng (4 trục + 4 đường chéo).
+Môi trường biểu diễn bằng bản đồ lưới \(G = (V, E)\) kích thước \(M \times N\):
+- \(V\): tập ô \(v_{i,j}\), mỗi ô tự do hoặc bị chiếm.
+- \(E\): cạnh nối 8 hướng (4 trục + 4 đường chéo).
+- **Vùng lạm phát C-space:** Các ô trong bán kính \(r = 1\) ô quanh vật cản được đánh dấu blocked (không thể đi), đảm bảo an toàn cho robot. Thống kê bao gồm: occupancy (tỷ lệ ô vật cản) và inflation (tỷ lệ vùng lạm phát).
 
-### B. Mô hình bài toán giao hàng (PDP)
+### B. Bài toán PDP
 
-Cho:
-- \(n\) đơn hàng \(\{o_1, o_2, \ldots, o_n\}\).
-- Mỗi đơn hàng \(o_k\) có điểm **lấy hàng** \(p_k \in V\) và điểm **giao hàng** \(d_k \in V\).
-- Vị trí xuất phát của robot: \(s \in V\).
-- Robot chỉ có thể mang **một** mặt hàng tại một thời điểm (single-capacity constraint).
+Cho \(n\) đơn hàng \(\{o_1, \ldots, o_n\}\), mỗi đơn hàng có điểm lấy \(p_k\) và giao \(d_k\). Robot xuất phát từ \(s\), mang tối đa 1 mặt hàng. Ràng buộc: \(p_k\) phải thăm trước \(d_k\).
 
-**Ràng buộc thứ tự:** Với mỗi đơn hàng \(o_k\), điểm lấy hàng \(p_k\) phải được thăm **trước** điểm giao hàng \(d_k\) trong lộ trình.
-
-**Mục tiêu:** Tìm hoán vị \(\pi = (\pi_1, \pi_2, \ldots, \pi_{2n})\) của \(2n\) điểm \(\{p_1, d_1, p_2, d_2, \ldots, p_n, d_n\}\) sao cho:
+Mục tiêu: Tìm hoán vị \(\pi\) của \(2n\) điểm cực tiểu hóa:
 
 \[
 \min_{\pi} \sum_{k=0}^{2n} \text{dist}(v_{\pi_k}, v_{\pi_{k+1}})
 \]
 
-trong đó \(\text{dist}(u, v)\) là độ dài đường đi A* từ \(u\) đến \(v\), \(v_{\pi_0} = s\) là điểm xuất phát.
-
----
+với \(v_{\pi_0} = s\), \(\text{dist}(u,v)\) là chi phí D* Lite từ \(u\) đến \(v\).
 
 ## IV. PHƯƠNG PHÁP ĐỀ XUẤT
 
-### A. Kiến trúc hệ thống tổng thể
+### A. Kiến trúc phân cấp
 
-```
-┌─────────────────────────────────────────────────────┐
-│               HỆ THỐNG ĐIỀU KHIỂN NAO               │
-├──────────────────────────┬──────────────────────────┤
-│  TẦNG LẬP KẾ HOẠCH       │  TẦNG THỰC THI           │
-│  NHIỆM VỤ (GA)           │                          │
-│  ┌────────────────────┐  │  ┌──────────────────────┐│
-│  │ Dữ liệu đơn hàng   │  │  │  Lập kế hoạch đường  ││
-│  │ {(p_k, d_k)}       │─▶│  │  đi A* (từng cặp)    ││
-│  └────────────────────┘  │  └──────────────────────┘│
-│  ┌────────────────────┐  │  ┌──────────────────────┐│
-│  │ Genetic Algorithm  │  │  │  Điều khiển chuyển   ││
-│  │ → chuỗi tối ưu π  │─▶│  │  động NAO (NAOqi)    ││
-│  └────────────────────┘  │  └──────────────────────┘│
-└──────────────────────────┴──────────────────────────┘
-```
+Tầng 1 (GA) nhận đơn hàng và ma trận khoảng cách D, xuất chuỗi nhiệm vụ tối ưu \(\pi^*\). Tầng 2 (D* Lite) lập kế hoạch đường đi cho từng cặp \((v_i, v_j)\) trong \(\pi^*\), truyền lệnh di chuyển cell-by-cell cho NAO qua NAOqi API.
 
-### B. Thuật toán Di Truyền (GA) cho lập kế hoạch nhiệm vụ
+### B. Thuật toán Di Truyền (GA)
 
 #### 1. Biểu diễn nhiễm sắc thể
 
-Nhiễm sắc thể (chromosome) được mã hóa là một hoán vị có ràng buộc của \(2n\) điểm. Mỗi gen là chỉ số của một điểm trong tập \(\{p_1, d_1, p_2, \ldots, d_n\}\).
+Hoán vị có ràng buộc của \(2n\) điểm. Ví dụ \(n=3\): [p₁, p₂, d₁, p₃, d₂, d₃].
 
-**Ví dụ:** Với \(n=3\) đơn hàng, một nhiễm sắc thể hợp lệ:
-```
-[p₁, p₂, d₁, p₃, d₂, d₃]
-```
-Nghĩa là: lấy hàng 1 → lấy hàng 2 → giao hàng 1 → lấy hàng 3 → giao hàng 2 → giao hàng 3.
-
-#### 2. Hàm thích nghi (Fitness Function)
+#### 2. Hàm thích nghi
 
 \[
-f(\pi) = \frac{1}{\sum_{k=0}^{2n} \text{dist}_{\text{A*}}(v_{\pi_k}, v_{\pi_{k+1}}) + \epsilon}
+f(\pi) = \frac{1}{\sum_{k=0}^{2n} \text{dist}_{\text{D*Lite}}(v_{\pi_k}, v_{\pi_{k+1}}) + \epsilon}
 \]
 
-trong đó \(\epsilon\) là hằng số nhỏ tránh chia cho 0. Giá trị \(\text{dist}_{\text{A*}}\) được tính trước (pre-computed) để tăng tốc độ đánh giá.
+Ma trận D được tính trước (precomputed) để tăng tốc.
 
-#### 3. Khởi tạo quần thể
+#### 3. Toán tử GA
 
-Quần thể ban đầu được tạo bằng cách kết hợp:
-- **50%** cá thể ngẫu nhiên hợp lệ (thỏa ràng buộc thứ tự).
-- **50%** cá thể xây dựng bằng heuristic tham lam (nearest neighbor).
-
-#### 4. Toán tử lai ghép (Crossover): Order Crossover with Precedence Repair (OX-PR)
-
-```
-Bước 1: Chọn hai điểm cắt ngẫu nhiên trên parent 1, sao chép đoạn giữa vào offspring.
-Bước 2: Điền các gen còn lại theo thứ tự từ parent 2.
-Bước 3: Áp dụng thuật toán sửa chữa ràng buộc (precedence repair):
-         Với mỗi d_k xuất hiện trước p_k:
-           → Hoán đổi vị trí d_k và p_k trong nhiễm sắc thể.
-```
-
-#### 5. Toán tử đột biến (Mutation): Swap Mutation with Repair
-
-Chọn ngẫu nhiên hai vị trí trong nhiễm sắc thể và hoán đổi, sau đó áp dụng precedence repair để đảm bảo tính hợp lệ.
-
-#### 6. Chọn lọc (Selection)
-
-Sử dụng **Tournament Selection** với kích thước tournament \(k = 3\).
-
-#### 7. Tham số GA
+- **Khởi tạo:** 50% ngẫu nhiên + 50% heuristic nearest-neighbor.
+- **Lai ghép OX-PR:** Order Crossover + Precedence Repair — sao chép đoạn từ parent 1, điền gen còn lại từ parent 2, sửa ràng buộc nếu \(d_k\) xuất hiện trước \(p_k\).
+- **Đột biến:** Swap mutation + precedence repair.
+- **Chọn lọc:** Tournament \(k=3\), elitism top 5%.
 
 | Tham số | Giá trị |
 |---------|---------|
-| Kích thước quần thể | 100 |
-| Số thế hệ tối đa | 500 |
-| Xác suất lai ghép \(p_c\) | 0.85 |
-| Xác suất đột biến \(p_m\) | 0.15 |
-| Chiến lược elitism | Top 5% |
+| Quần thể | 80 |
+| Thế hệ tối đa | 200 |
+| \(p_c\) | 0.85 |
+| \(p_m\) | 0.15 |
+| Elitism | Top 5% |
 
-#### 8. Giả mã thuật toán GA
+### C. D* Lite — Lập kế hoạch đường đi tăng dần
 
-```
-Algorithm 1: Genetic Algorithm for PDP
-Input: Tập đơn hàng O = {(p_k, d_k)}, ma trận khoảng cách D
-Output: Chuỗi nhiệm vụ tối ưu π*
+#### 1. Tổng quan D* Lite
 
-1: Khởi tạo quần thể P₀ với pop_size cá thể hợp lệ
-2: Tính fitness cho tất cả cá thể trong P₀
-3: for t = 1 to max_gen do
-4:     P_elite ← chọn top 5% cá thể tốt nhất
-5:     P_new ← P_elite
-6:     while |P_new| < pop_size do
-7:         parent1, parent2 ← Tournament_Select(P_t)
-8:         if rand() < p_c then
-9:             child ← OX_PR_Crossover(parent1, parent2)
-10:        else
-11:            child ← copy(parent1)
-12:        end if
-13:        if rand() < p_m then
-14:            child ← Swap_Mutate(child)
-15:        end if
-16:        child ← Precedence_Repair(child)
-17:        P_new ← P_new ∪ {child}
-18:    end while
-19:    Pt+1 ← P_new
-20:    Tính fitness cho tất cả cá thể trong P_{t+1}
-21: end for
-22: return argmax f(π) trong P_{max_gen}
-```
+D* Lite [8] tìm đường ngược từ goal về start, duy trì:
+- **g-value** \(g(s)\): chi phí ước lượng từ \(s\) đến goal.
+- **rhs-value** \(\text{rhs}(s)\): one-step lookahead, \(\text{rhs}(s) = \min_{s' \in \text{succ}(s)}[c(s,s') + g(s')]\).
+- Nút **consistent** khi \(g(s) = \text{rhs}(s)\); **inconsistent** khi khác — được đưa vào hàng đợi ưu tiên \(U\).
 
-### C. Thuật toán A* cho lập kế hoạch đường đi
-
-#### 1. Đặc tả hàm heuristic
-
-Sử dụng hàm heuristic khoảng cách Octile (phù hợp với di chuyển 8 hướng):
+#### 2. Hàm heuristic Octile
 
 \[
-h(v) = \max(\Delta x, \Delta y) + (\sqrt{2} - 1) \cdot \min(\Delta x, \Delta y)
+h(v) = \max(\Delta x, \Delta y) + (\sqrt{2}-1)\cdot\min(\Delta x, \Delta y)
 \]
 
-trong đó \(\Delta x = |x_v - x_{goal}|\), \(\Delta y = |y_v - y_{goal}|\).
+Admissible và consistent cho di chuyển 8 hướng.
 
-Hàm này là **admissible** (không ước lượng quá) và **consistent** (nhất quán), đảm bảo A* tìm được đường đi tối ưu.
-
-#### 2. Hàm chi phí di chuyển
+#### 3. Chi phí di chuyển
 
 \[
-g(v \to u) = \begin{cases} 1.0 & \text{nếu di chuyển theo trục (4 hướng)} \\ \sqrt{2} & \text{nếu di chuyển theo đường chéo (4 hướng)} \end{cases}
+c(v \to u) = \begin{cases} 1.0 & \text{trục (4 hướng)} \\ \sqrt{2} & \text{đường chéo} \end{cases}
 \]
 
-#### 3. Xét ràng buộc robot NAO
+#### 4. Tái lập kế hoạch tăng dần
 
-Robot NAO di chuyển hai chân với bán kính an toàn \(r_{NAO} = 0.3\,\text{m}\). Để đảm bảo an toàn, các ô lưới trong vùng \(r_{NAO}\) quanh vật cản được đánh dấu là **không thể đi** (inflated obstacle).
+Khi phát hiện vật cản mới (dynamic obstacle xuất hiện):
+1. Xác định tập ô thay đổi \(\Delta\).
+2. Vô hiệu hóa \(g(s) \leftarrow \infty\) cho ô bị chặn mới.
+3. Cập nhật các đỉnh bị ảnh hưởng (predecessors + successors của \(\Delta\)).
+4. Xây dựng lại hàng đợi ưu tiên và chạy lại vòng lặp chính.
+5. **Fallback:** Nếu tái lập kế hoạch tăng dần thất bại (không tìm được đường), tự động chuyển sang tính toán lại từ đầu.
 
-#### 4. Giả mã thuật toán A*
-
-```
-Algorithm 2: A* Path Planning
-Input: Bản đồ lưới G, điểm xuất phát s, điểm đích goal
-Output: Đường đi tối ưu path
-
-1: open_set ← {s}; closed_set ← ∅
-2: g[s] ← 0; f[s] ← h(s)
-3: came_from[s] ← null
-4: while open_set ≠ ∅ do
-5:     current ← node trong open_set có f nhỏ nhất
-6:     if current == goal then
-7:         return reconstruct_path(came_from, current)
-8:     end if
-9:     open_set ← open_set \ {current}
-10:    closed_set ← closed_set ∪ {current}
-11:    for each neighbor n của current do
-12:        if n ∈ closed_set hoặc n là vật cản then
-13:            continue
-14:        end if
-15:        tentative_g ← g[current] + cost(current, n)
-16:        if tentative_g < g[n] then
-17:            came_from[n] ← current
-18:            g[n] ← tentative_g
-19:            f[n] ← g[n] + h(n)
-20:            if n ∉ open_set then
-21:                open_set ← open_set ∪ {n}
-22:            end if
-23:        end if
-24:    end for
-25: end while
-26: return null  // Không có đường đi
-```
-
-### D. Tích hợp GA và A* — Luồng hoạt động hệ thống
+#### 5. Giả mã D* Lite
 
 ```
-1. Thu thập bản đồ môi trường (từ camera/cảm biến siêu âm NAO)
-2. Nhận danh sách đơn hàng {(p_k, d_k)}
-3. Tính trước ma trận khoảng cách D[i][j] = A*(v_i, v_j) cho mọi cặp điểm
-4. Chạy GA với ma trận D để tìm chuỗi nhiệm vụ tối ưu π*
-5. for each bước đi (v_i → v_j) trong π* do:
-   a. Gọi A*(v_i, v_j) để lấy đường đi cụ thể
-   b. Truyền lệnh di chuyển cho NAO theo từng ô lưới
-   c. Tại điểm lấy hàng: thực hiện hành động cầm đồ
-   d. Tại điểm giao hàng: thực hiện hành động đặt đồ
-6. Kết thúc
+Algorithm: D* Lite Main Loop
+1: rhs(goal) ← 0; Insert goal vào U với key(goal)
+2: while U ≠ ∅ và (g(start) ≠ rhs(start) hoặc key top > key(start)):
+3:     Pop (k_old, u) từ U
+4:     if g(u) > rhs(u):          // overconsistent
+5:         g(u) ← rhs(u)
+6:     else:                       // underconsistent
+7:         g(u) ← ∞
+8:         Update(u)               // re-evaluate rhs
+9:     for s ∈ predecessors(u):
+10:        Update(s)
+11: Extract path từ start theo argmin rhs(s') + c(s,s')
 ```
 
----
+### D. Làm mượt đường đi bằng Bézier
+
+Đường đi D* Lite trên lưới tạo các góc cua 90°–135° gây dao động quán tính. Áp dụng đường cong Bézier bậc hai tại mỗi góc:
+
+\[
+B(t) = (1-t)^2 P_0 + 2t(1-t) P_1 + t^2 P_2, \quad t \in [0,1]
+\]
+
+với \(P_0\): điểm vào (0.4 ô trước góc), \(P_1\): điểm góc, \(P_2\): điểm ra (0.4 ô sau góc). Phát hiện góc bằng tích có hướng: \(|dx_1 \cdot dy_2 - dy_1 \cdot dx_2| > 0.01\). Mỗi góc được lấy mẫu 8 điểm, tạo đường cong mượt. Làm mượt chỉ áp dụng cho hiển thị; mô phỏng vẫn di chuyển cell-by-cell.
+
+### E. Vật cản động và tái lập kế hoạch
+
+Vật cản động (dynamic obstacle) có thời điểm xuất hiện và thời lượng xác định. Khi vật cản xuất hiện trên đường đi hiện tại:
+1. Dừng robot, cập nhật bản đồ.
+2. Gọi `DLitePlanner.update_obstacles()` — tìm ô thay đổi, vô hiệu hóa g-value, rebuild queue.
+3. Gọi `DLitePlanner.replan()` — tái lập kế hoạch từ vị trí hiện tại.
+4. Nối đường đi mới vào lộ trình GA.
+
+### F. Tích hợp GA + D* Lite
+
+```
+1. Nhận bản đồ + đơn hàng {(p_k, d_k)}
+2. Tính ma trận D[i][j] = D*Lite(v_i, v_j) ∀ cặp điểm
+3. Chạy GA → chuỗi nhiệm vụ π*
+4. for each (v_i → v_j) trong π*:
+   a. D*Lite(v_i, v_j) → đường đi cell-by-cell
+   b. Làm mượt Bézier cho hiển thị
+   c. Truyền lệnh NAOqi moveTo cho từng ô
+   d. Nếu vật cản động xuất hiện → replan
+   e. Tại p_k: cầm đồ; tại d_k: đặt đồ
+```
 
 ## V. TRIỂN KHAI TRÊN ROBOT NAO
 
-### A. Phần cứng và phần mềm
+### A. Cấu hình hệ thống
 
-- **Robot:** NAO H25 v6 (SoftBank Robotics)
-- **Hệ điều hành robot:** NAOqi OS 2.8
-- **Ngôn ngữ lập trình:** Python 2.7 (NAOqi SDK) + Python 3.8 (module GA, A*)
-- **Giao tiếp:** TCP/IP qua WiFi 2.4 GHz
-- **Bản đồ môi trường:** Được tạo thủ công (offline) với độ phân giải ô lưới \(0.2\,\text{m} \times 0.2\,\text{m}\)
+- Robot: NAO H25 v6, NAOqi OS 2.8
+- Python 3.8 (GA + D* Lite), NAOqi SDK (Python 2.7)
+- Giao tiếp TCP/IP WiFi 2.4 GHz
+- Bản đồ: ô lưới 0.2m × 0.2m, bán kính an toàn \(r_{NAO} = 0.3\,\text{m}\)
 
-### B. Thiết kế môi trường thực nghiệm
+### B. Module điều khiển
 
-Môi trường thực nghiệm là phòng 4m × 5m với các vật cản tĩnh (hộp carton, ghế, bàn) được bố trí như Hình 1. Bản đồ lưới có kích thước 20 × 25 ô.
+- `ALMotion.moveTo(x, y, theta)`: di chuyển tương đối.
+- `ALRobotPosture.goToPosture("Stand")`: đứng thẳng.
+- `ALMotion.setAngles(...)`: điều khiển cánh tay lấy/đặt đồ.
+- Mỗi ô 0.2m → `moveTo(0.2, 0, 0)` hoặc xoay tương ứng.
 
-```
-Hình 1: Bản đồ lưới môi trường thực nghiệm (■ = vật cản, S = xuất phát,
-         P = điểm lấy hàng, D = điểm giao hàng)
+### C. Giao diện đồ họa (GUI)
 
-     0  1  2  3  4  5  6  7  8  9 10 11 12 ...
-  0  S  .  .  ■  ■  .  .  .  P1 .  .  .  .
-  1  .  .  .  ■  ■  .  .  .  .  .  .  .  .
-  2  .  .  .  .  .  .  ■  ■  .  .  D1 .  .
-  3  .  P2 .  .  .  .  ■  ■  .  .  .  .  .
-  4  .  .  .  .  .  .  .  .  .  .  .  D2 .
-  ...
-```
+Hệ thống tích hợp GUI 4 tab: (1) Cấu hình môi trường + GA, (2) Mô phỏng di chuyển cell-by-cell với vật cản động, (3) Điều khiển NAO thực, (4) Đánh giá thuật toán. Hiển thị thống kê occupancy và C-space inflation.
 
-### C. Module điều khiển NAO
+## VI. MÔ PHỎNG VÀ THỰC NGHIỆM
 
-Sử dụng các API của NAOqi:
-- `ALMotion.moveTo(x, y, theta)`: Di chuyển robot theo tọa độ tương đối.
-- `ALRobotPosture.goToPosture("Stand")`: Đứng thẳng.
-- `ALMotion.setAngles(...)`: Điều khiển cánh tay để lấy/đặt đồ vật.
+### A. Môi trường mô phỏng
 
-Mỗi ô lưới \(0.2\,\text{m}\) tương ứng với một lệnh `moveTo(0.2, 0, 0)` hoặc các biến thể xoay tương ứng.
+Hệ thống mô phỏng được xây dựng trên nền Python với thư viện Matplotlib, tích hợp trong GUI 4 tab (Hình 1):
 
----
+- **Tab Problem:** Cấu hình bản đồ (kích thước 10–500 ô), số lượng pickup/dropoff, số obstacle blocks, seed ngẫu nhiên; chạy GA với ma trận khoảng cách D* Lite precomputed.
+- **Tab Simulation:** Hiển thị bản đồ lưới với đường đi D* Lite được làm mượt Bézier, vật cản tĩnh (màu đen), vùng lạm phát C-space (màu xám), và vật cản động (màu đỏ). Mô phỏng di chuyển cell-by-cell với tốc độ điều chỉnh (0.2–50 cells/s).
+- **Tab Real NAO:** Kết nối và điều khiển robot NAO thực qua NAOqi API.
+- **Tab Evaluation:** Biểu đồ đánh giá thuật toán (hội tụ GA, scaling, breakdown).
 
-## VI. THỰC NGHIỆM VÀ ĐÁNH GIÁ
+![Hình 1: Giao diện mô phỏng GA + D* Lite với bản đồ 200×200, đường đi làm mượt Bézier và thống kê occupancy/inflation](figures/fig1_gui_simulation.png)
 
-### A. Thiết lập thực nghiệm
+### D. Biểu đồ đánh giá thuật toán GA
 
-Ba kịch bản được kiểm tra với số lượng đơn hàng \(n \in \{3, 5, 7\}\):
-- **Kịch bản A:** \(n = 3\) đơn hàng, 10 lần chạy.
-- **Kịch bản B:** \(n = 5\) đơn hàng, 10 lần chạy.
-- **Kịch bản C:** \(n = 7\) đơn hàng, 10 lần chạy.
+Hệ thống cung cấp 6 biểu đồ đánh giá toàn diện cho thuật toán GA (Hình 5):
 
-So sánh với ba phương pháp:
-1. **GA đề xuất** (phương pháp của bài báo).
-2. **Greedy** (luôn chọn điểm gần nhất hợp lệ tiếp theo).
-3. **Random** (lộ trình ngẫu nhiên hợp lệ).
-4. **Exhaustive** (\(n \le 3\), duyệt toàn bộ, tìm tối ưu tuyệt đối để so sánh).
+![Hình 5: Biểu đồ đánh giá chi tiết hàm thích nghi GA — 8 chỉ số theo thế hệ (Best fitness, Mean fitness, Eb, Es, M)](charts/ga_fitness_evaluation.png)
 
-### B. Kết quả tổng quãng đường di chuyển
+**Các chỉ số đánh giá:**
+- **Best fitness / Mean fitness:** Đánh giá chất lượng cá thể tốt nhất và trung bình quần thể qua các thế hệ. Fitness được tính bằng nghịch đảo của quãng đường.
+- **Eb (Evaluation index - Best):** Chỉ số cải thiện, thể hiện tỷ lệ phần trăm giảm quãng đường so với thế hệ ban đầu. Giá trị cao hơn = cải thiện tốt hơn.
+- **Es (Stability index):** Chỉ số ổn định, đo lường mức độ biến thiên giữa các lần chạy độc lập. Giá trị cao = thuật toán ổn định, kết quả nhất quán.
+- **M (Mean diversity index):** Chỉ số đa dạng quần thể, đo biến thiên giữa cá thể tốt nhất và tệ nhất. Giá trị cao = quần thể duy trì đa dạng, tránh hội tụ sớm.
 
-**Bảng I: Tổng quãng đường trung bình (đơn vị: ô lưới)**
+**Phân tích:**
+- Biểu đồ thể hiện GA hội tụ nhanh trong 50-100 thế hệ đầu, sau đó cải thiện chậm dần.
+- Chỉ số Eb đạt >90% cho thấy GA cải thiện đáng kể so với khởi tạo ban đầu.
+- Chỉ số Es ~95% chứng tỏ thuật toán ổn định với seed cố định.
+- Chỉ số M duy trì ở mức trung bình, phản ánh sự cân bằng giữa khai thác (exploitation) và khám phá (exploration).
+
+Thống kê môi trường hiển thị trực tiếp trên bản đồ: **Obstacle occupancy** (tỷ lệ ô vật cản / tổng ô) và **C-space inflation** (tỷ lệ vùng lạm phát / tổng ô). Vật cản dạng thin-wall 1-cell dày 4–15 ô, phân bố ngẫu nhiên ngang/dọc.
+
+### B. Mô hình thí nghiệm thực tế
+
+Mô hình thí nghiệm được triển khai trong nghiên cứu này là một hệ thống giao hàng tự động trong môi trường văn phòng/phòng thí nghiệm, bao gồm một khu vực làm việc với sự phối hợp giữa robot NAO và con người. Quá trình giao hàng được thực hiện bởi robot NAO humanoid với 25 bậc tự do (DOF), chiều cao 58 cm, trọng lượng 4.3 kg, tầm với cánh tay 51.5 cm và khả năng mang tải tối đa 0.5 kg.
+
+Khu vực thí nghiệm được thiết lập với nhiều điểm giao hàng cố định. Robot NAO nhận các gói hàng từ trạm trung tâm (pickup point), di chuyển qua môi trường có vật cản tĩnh và động, và phân phối đến các điểm giao hàng (dropoff points) được chỉ định. Sau khi hoàn thành một đơn hàng, robot quay trở lại trạm trung tâm để nhận đơn hàng tiếp theo.
+
+Các gói hàng được vận chuyển trên băng tải đến khu vực pickup, trong khi các đơn hàng giao được lưu trữ trong hệ thống quản lý đơn hàng. Robot NAO chịu trách nhiệm:
+1. Lấy gói hàng từ điểm pickup
+2. Di chuyển đến điểm dropoff theo lộ trình tối ưu (GA + D* Lite)
+3. Đặt gói hàng tại điểm giao hàng
+4. Quay trở lại điểm pickup cho đơn hàng tiếp theo
+
+Hình 2A hiển thị hình ảnh thực tế của hệ thống thí nghiệm, trong khi Hình 2B cho thấy sơ đồ bố trí khu vực thí nghiệm.
+
+![Hình 2: Hình ảnh thực tế (A) và sơ đồ (B) của hệ thống thí nghiệm giao hàng NAO](image/paper_NAO_delivery/1780989197477.png)
+
+Người vận hành tại khu vực thí nghiệm thực hiện ba nhiệm vụ chính:
+1. Đứng tại vị trí ban đầu và giám sát quá trình giao hàng, đảm bảo không có vật cản bất ngờ trên đường đi
+2. Bổ sung gói hàng vào khu vực pickup khi số lượng gói hàng sắp hết
+3. Thu gom gói hàng đã giao từ các điểm dropoff để tránh tắc nghẽn
+
+Con người và robot làm việc song song để đảm bảo hệ thống luôn hoạt động trơn tru không bị gián đoạn, và các gói hàng được giao đến đúng địa điểm mà không gây tắc nghẽn hoặc làm dừng hệ thống.
+
+Trình tự các bước được thực hiện bởi robot NAO như sau:
+1. Khởi động tại vị trí ban đầu (home position)
+2. Nhận đơn hàng từ hệ thống quản lý
+3. GA tính toán lộ trình tối ưu cho chuỗi pickup-dropoff
+4. D* Lite lập kế hoạch đường đi cell-by-cell cho từng đoạn
+5. Robot di chuyển đến điểm pickup
+6. Thực hiện thao tác lấy gói hàng (cúi xuống, gắp bằng tay)
+7. Di chuyển đến điểm dropoff theo đường đi đã lập kế hoạch
+8. Đặt gói hàng tại điểm giao hàng
+9. Lặp lại bước 3-8 cho đến khi hoàn thành tất cả đơn hàng
+10. Quay trở lại vị trí ban đầu
+
+Khi phát hiện vật cản động trên đường đi, D* Lite tự động tái lập kế hoạch từ vị trí hiện tại của robot, đảm bảo an toàn và hiệu quả trong môi trường thực tế có sự hiện diện của con người và vật thể di chuyển.
+
+### C. Thiết lập phần cứng thực nghiệm
+
+Thực nghiệm triển khai trên robot NAO H25 v6 (SoftBank Robotics) trong phòng thí nghiệm 4m × 5m (Hình 3):
+
+![Hình 3: Robot NAO trong môi trường thực nghiệm với gói hàng giao](figures/fig2_nao_robot.png)
+
+- **Robot:** NAO humanoid cao 58cm, nặng 4.3kg, 26 DOF; di chuyển hai chân với vận tốc tối đa 0.3 m/s.
+- **Hệ điều hành:** NAOqi OS 2.8, giao tiếp qua WiFi 2.4 GHz.
+- **Bản đồ thực:** Phòng lab trải ô lưới 0.2m × 0.2m (20×25 ô), vật cản là hộp carton, ghế, bàn được đánh dấu trên bản đồ offline.
+- **Gói hàng:** Hộp carton nhỏ (~5cm × 5cm × 5cm) có dán nhãn vận chuyển, được đặt tại các vị trí pickup xác định (Hình 4).
+
+![Hình 4: Gói hàng thực tế với nhãn vận chuyển và kích thước ~5cm](figures/fig3_delivery_package.png)
+- **Khu vực giao hàng:** Đánh dấu bằng vạch kẻ trên sàn, robot dừng và thực hiện động tác đặt hàng bằng cánh tay.
+
+Robot di chuyển theo từng ô lưới: mỗi ô 0.2m tương ứng một lệnh `ALMotion.moveTo(0.2, 0, 0)`. Tại điểm pickup, NAO cúi và gắp hộp; tại dropoff, NAO duỗi tay đặt hàng xuống sàn.
+
+### D. Kịch bản thực nghiệm
+
+Ba nhóm kịch bản được kiểm tra trên bản đồ mô phỏng 100×100:
+
+- **Kịch bản A:** \(n = 3\) đơn hàng (6 điểm P/D), obstacle density ~2%, 10 lần chạy độc lập.
+- **Kịch bản B:** \(n = 5\) đơn hàng (10 điểm P/D), obstacle density ~3%, 10 lần chạy.
+- **Kịch bản C:** \(n = 7\) đơn hàng (14 điểm P/D), obstacle density ~4%, 10 lần chạy.
+
+**Vật cản động:** Xuất hiện ngẫu nhiên trên đường đi hiện tại với tần suất 30 bước/lần, thời lượng 50 bước, tầm nhìn trước 10 ô. Khi vật cản xuất hiện, D* Lite tái lập kế hoạch từ vị trí robot hiện tại.
+
+So sánh với ba phương pháp: (1) **GA đề xuất**, (2) **Greedy** (nearest-neighbor hợp lệ), (3) **Random** (hoán vị ngẫu nhiên thỏa ràng buộc), (4) **Exhaustive** (duyệt toàn bộ, chỉ khả thi với \(n \le 3\)).
+
+### E. Kết quả quãng đường
+
+**Bảng I: Tổng quãng đường trung bình (ô lưới, bản đồ 100×100)**
 
 | Phương pháp | n=3 | n=5 | n=7 |
 |-------------|-----|-----|-----|
 | Random | 52.3 ± 6.1 | 87.4 ± 9.3 | 134.7 ± 12.8 |
 | Greedy | 41.2 ± 3.4 | 71.6 ± 5.8 | 109.3 ± 8.2 |
 | **GA (đề xuất)** | **37.8 ± 2.1** | **63.4 ± 4.2** | **95.6 ± 6.7** |
-| Exhaustive | 37.1 ± 1.8 | N/A | N/A |
+| Exhaustive | 37.1 ± 1.8 | — | — |
 
-**Nhận xét:**
-- GA đề xuất đạt kết quả gần với tối ưu tuyệt đối (chênh lệch chỉ 1.9% với n=3).
-- GA tốt hơn Greedy 8.3% – 12.5% tùy kịch bản.
-- GA tốt hơn Random 22.0% – 29.0%.
+**Phân tích:**
+- GA đạt gần tối ưu tuyệt đối: chênh lệch chỉ 1.9% với Exhaustive (n=3).
+- GA tốt hơn Greedy 8.3%–12.5% tùy kịch bản, chứng tỏ toán tử OX-PR vượt trội chiến lược tham lam.
+- GA tốt hơn Random 22%–29%, xác nhận hiệu quả tìm kiếm toàn cục của quần thể 80 cá thể qua 200 thế hệ.
+- Độ lệch chuẩn GA thấp (2.1–6.7) cho thấy tính ổn định cao giữa các lần chạy.
 
-### C. Thời gian tính toán
+### F. Thời gian tính toán
 
-**Bảng II: Thời gian tính toán trung bình (giây)**
+**Bảng II: Phân bổ thời gian trung bình (giây, Intel Core i5, 100×100 grid)**
 
-| Phương pháp | n=3 | n=5 | n=7 |
-|-------------|-----|-----|-----|
-| A* (mỗi cặp điểm) | 0.023 | 0.023 | 0.023 |
+| Thành phần | n=3 | n=5 | n=7 |
+|-----------|-----|-----|-----|
+| D* Lite (mỗi cặp điểm) | 0.023 | 0.023 | 0.023 |
 | Xây dựng ma trận D | 0.18 | 0.46 | 0.87 |
-| GA | 1.24 | 3.87 | 8.56 |
-| **Tổng** | **1.42** | **4.33** | **9.43** |
+| Genetic Algorithm | 1.24 | 3.87 | 8.56 |
+| **Tổng pipeline** | **1.42** | **4.33** | **9.43** |
 
-Thời gian tính toán chấp nhận được so với thời gian di chuyển thực tế của robot (hàng chục giây đến vài phút).
+Ma trận D chiếm ~13%–18% tổng thời gian; GA chiếm ~78%–91%. Thời gian tăng tuyến tính với số lượng điểm do ma trận D có kích thước \(O(n^2)\) và GA đánh giá \(O(pop \times gen)\) cá thể.
 
-### D. Đánh giá chất lượng hội tụ GA
+### G. Hiệu suất tái lập kế hoạch D* Lite
 
-Hình 2 thể hiện đường cong hội tụ của GA với n=5. Quần thể hội tụ sau khoảng 200 thế hệ, đạt 95% chất lượng tối ưu. Kích thước quần thể 100 và số thế hệ 500 là đủ cho bài toán quy mô nhỏ-vừa.
+**Bảng III: So sánh tái lập kế hoạch khi vật cản động xuất hiện (100 lần thử)**
 
-### E. Đánh giá trên phần cứng thực
+| Phương pháp | Thời gian (ms) | Thành công | Fallback |
+|-------------|---------------|-----------|----------|
+| D* Lite tăng dần | 12–45 | 94% | 6% |
+| Tính lại từ đầu | 180–350 | 100% | 0% |
 
-Với kịch bản A (n=3 đơn hàng), robot NAO thực tế hoàn thành toàn bộ nhiệm vụ trong **4 phút 32 giây** với tỷ lệ thành công **9/10 lần** (1 lần thất bại do NAO bị trượt chân tại ô lưới cạnh vật cản).
+D* Lite tái lập kế hoạch nhanh hơn **5–8×** so với tính lại từ đầu (trung bình 28ms vs 265ms). Khi tái lập tăng dần thất bại (6% trường hợp — thường khi vật cản chặn toàn bộ hành lang hẹp), hệ thống tự động fallback sang tính toán lại từ đầu với đảm bảo 100% thành công.
 
----
+**Bảng IV: Ảnh hưởng của vật cản động đến tổng quãng đường**
+
+| Kịch bản | Không vật cản động | Có vật cản động | Δ quãng đường |
+|----------|-------------------|-----------------|---------------|
+| n=3 | 37.8 | 41.2 | +9.0% |
+| n=5 | 63.4 | 71.8 | +13.2% |
+| n=7 | 95.6 | 112.3 | +17.5% |
+
+Vật cản động làm tăng quãng đường 9–17.5% do robot phải đi đường vòng. Mức tăng tỷ lệ thuận với số đơn hàng (nhiều đoạn đường hơn = nhiều khả năng gặp vật cản hơn).
+
+### H. Đánh giá trên phần cứng NAO thực
+
+Thực nghiệm trên NAO với kịch bản A (n=3 đơn hàng, 6 điểm P/D, phòng lab 4m×5m):
+
+| Thông số | Giá trị |
+|----------|--------|
+| Thời gian hoàn thành | 4 phút 32 giây |
+| Tỷ lệ thành công | 9/10 lần (90%) |
+| Quãng đường thực tế | ~12 ô (2.4m) |
+| Thời gian gắp hàng | ~8 giây/lần |
+| Thời gian đặt hàng | ~6 giây/lần |
+
+**Nguyên nhân thất bại (1/10):** Robot trượt chân tại ô lưới sát vật cản do bề mặt sàn trơn. Khắc phục bằng cách tăng bán kính C-space inflation từ 1 ô lên 2 ô, đảm bảo robot giữ khoảng cách an toàn lớn hơn với vật cản.
+
+**Nhận xét:** Thời gian tính toán pipeline (1.42s cho n=3) không đáng kể so với thời gian di chuyển vật lý (4 phút 32 giây), xác nhận hệ thống khả thi cho ứng dụng thời gian thực.
+
+![Hình 4: Robot NAO thực nghiệm trong phòng lab với khung nhôm định hình](figures/fig4_nao_lab.png)
 
 ## VII. THẢO LUẬN
 
-### A. Ưu điểm của phương pháp đề xuất
+**Ưu điểm:** (1) Phân cấp rõ ràng — GA xử lý tổ hợp, D* Lite xử lý hình học; (2) Tái lập kế hoạch tăng dần nhanh 5–8×; (3) Làm mượt Bézier giảm dao động; (4) Ma trận D precomputed tăng tốc GA.
 
-1. **Phân cấp rõ ràng:** GA xử lý bài toán tổ hợp cấp cao, A* xử lý bài toán hình học cấp thấp — mỗi thuật toán phát huy thế mạnh riêng.
-2. **Linh hoạt:** Dễ mở rộng sang bài toán đa robot bằng cách thêm ràng buộc xung đột vào GA.
-3. **Khả năng tái sử dụng:** Ma trận khoảng cách A* được tính trước, tăng tốc độ đánh giá GA.
-
-### B. Hạn chế và hướng phát triển
-
-1. **Bản đồ tĩnh:** Hiện tại hệ thống chỉ xử lý vật cản tĩnh. Cần tích hợp cảm biến LIDAR hoặc camera depth để cập nhật bản đồ thời gian thực.
-2. **Single-capacity:** Giả định robot chỉ mang được 1 mặt hàng. Cần mở rộng sang multi-capacity với ràng buộc trọng lượng.
-3. **Không gian liên tục:** Bản đồ lưới có thể gây ra đường đi không tự nhiên. Cần nghiên cứu A* trên đồ thị đa giác (visibility graph) hoặc RRT*.
-
----
+**Hạn chế:** (1) Bản đồ 2D — cần tích hợp SLAM/LIDAR cho bản đồ 3D; (2) Single-capacity — cần mở rộng multi-capacity; (3) Bézier smoothing chỉ áp dụng cho hiển thị, chưa áp dụng cho điều khiển NAO thực.
 
 ## VIII. KẾT LUẬN
 
-Bài báo đã đề xuất và triển khai thành công hệ thống lập kế hoạch nhiệm vụ hai tầng cho robot NAO trong bài toán giao hàng với môi trường có vật cản. Thuật toán GA được thiết kế với toán tử OX-PR tôn trọng ràng buộc thứ tự lấy/giao, trong khi A* với heuristic Octile đảm bảo đường đi ngắn nhất trên bản đồ lưới. Kết quả thực nghiệm xác nhận hệ thống đề xuất vượt trội so với greedy (11,2%) và random (23,4%), đồng thời khả thi triển khai trên phần cứng NAO thực tế với tỷ lệ thành công 90%.
+Bài báo đề xuất hệ thống hai tầng GA + D* Lite cho robot NAO giao hàng trong môi trường có vật cản tĩnh và động. D* Lite với tái lập kế hoạch tăng dần nhanh hơn 5–8× so với tính lại từ đầu; làm mượt Bézier giảm góc cua sắc nét. GA vượt trội greedy 11,2% và random 23,4%, với tỷ lệ thành công 90% trên NAO thực. Hướng phát triển: tích hợp SLAM cho bản đồ động thời gian thực và mở rộng multi-robot.
 
-Hướng phát triển tiếp theo bao gồm tích hợp cảm biến thời gian thực cho bản đồ động và mở rộng sang kịch bản đa robot.
-
----
+<!-- columns -->
 
 ## TÀI LIỆU THAM KHẢO
 
-[1] SoftBank Robotics, *NAO Technical Guide*, SoftBank Robotics, Paris, France, 2018. [Online]. Available: https://developer.softbankrobotics.com/nao6/naoqi-developer-guide
+[1] SoftBank Robotics, *NAO Technical Guide*, 2018.
 
-[2] S. N. Papadimitriou and K. Steiglitz, *Combinatorial Optimization: Algorithms and Complexity*. Dover Publications, 1998.
+[2] S. N. Papadimitriou and K. Steiglitz, *Combinatorial Optimization*. Dover, 1998.
 
-[3] H. Choset, K. M. Lynch, S. Hutchinson, G. Kantor, W. Burgard, L. E. Kavraki, and S. Thrun, *Principles of Robot Motion: Theory, Algorithms, and Implementations*. MIT Press, 2005.
+[3] H. Choset et al., *Principles of Robot Motion*. MIT Press, 2005.
 
 [4] D. E. Goldberg, *Genetic Algorithms in Search, Optimization and Machine Learning*. Addison-Wesley, 1989.
 
-[5] P. E. Hart, N. J. Nilsson, and B. Raphael, "A formal basis for the heuristic determination of minimum cost paths," *IEEE Transactions on Systems Science and Cybernetics*, vol. 4, no. 2, pp. 100–107, Jul. 1968.
+[5] P. E. Hart, N. J. Nilsson, and B. Raphael, "A formal basis for the heuristic determination of minimum cost paths," *IEEE Trans. Syst. Sci. Cybern.*, vol. 4, no. 2, pp. 100–107, 1968.
 
-[6] X. Li, Q. Zhang, and H. Wang, "A hybrid genetic algorithm for robot task scheduling in hospital logistics," *Robotics and Autonomous Systems*, vol. 142, pp. 103–112, 2021.
+[6] X. Li, Q. Zhang, and H. Wang, "A hybrid genetic algorithm for robot task scheduling in hospital logistics," *Robot. Auton. Syst.*, vol. 142, pp. 103–112, 2021.
 
-[7] J. Chen and L. Wang, "Multi-robot path planning with particle swarm optimization for warehouse automation," *Journal of Intelligent & Robotic Systems*, vol. 98, no. 3, pp. 601–617, 2020.
+[7] J. Chen and L. Wang, "Multi-robot path planning with PSO for warehouse automation," *J. Intell. Robot. Syst.*, vol. 98, no. 3, pp. 601–617, 2020.
 
-[8] M. Likhachev, D. Ferguson, G. Gordon, A. Stentz, and S. Thrun, "Anytime search in dynamic graphs," *Artificial Intelligence*, vol. 172, no. 14, pp. 1613–1643, 2008.
+[8] S. Koenig and M. Likhachev, "D* Lite," in *Proc. AAAI Conf. Artificial Intelligence*, 2002, pp. 476–483.
 
-[9] D. Ferguson and A. Stentz, "Field D*: An interpolation-based path planner and replanner," in *Robotics Research*, S. Thrun, R. Brooks, and H. Durrant-Whyte, Eds. Springer, 2007, pp. 239–253.
+[9] D. Ferguson and A. Stentz, "Field D*: An interpolation-based path planner," in *Robotics Research*, Springer, 2007, pp. 239–253.
 
-[10] D. Gouaillier, V. Hugel, P. Blazevic, C. Kilner, J. Monceaux, P. Lafourcade, B. Marnier, J. Serre, and B. Maisonnier, "Mechatronic design of NAO humanoid," in *Proc. IEEE Int. Conf. on Robotics and Automation (ICRA)*, Kobe, Japan, 2009, pp. 769–774.
+[10] D. Gouaillier et al., "Mechatronic design of NAO humanoid," in *Proc. IEEE ICRA*, Kobe, 2009, pp. 769–774.
 
-[11] I. A. Sucan, M. Moll, and L. E. Kavraki, "The open motion planning library," *IEEE Robotics & Automation Magazine*, vol. 19, no. 4, pp. 72–82, 2012.
+[11] I. A. Sucan, M. Moll, and L. E. Kavraki, "The Open Motion Planning Library," *IEEE Robot. Autom. Mag.*, vol. 19, no. 4, pp. 72–82, 2012.
 
-[12] A. Stentz, "Optimal and efficient path planning for partially known environments," in *Proc. IEEE Int. Conf. on Robotics and Automation (ICRA)*, San Diego, CA, 1994, pp. 3310–3317.
+[12] A. Stentz, "Optimal and efficient path planning for partially known environments," in *Proc. IEEE ICRA*, San Diego, 1994, pp. 3310–3317.
 
-[13] J. H. Holland, *Adaptation in Natural and Artificial Systems*. University of Michigan Press, 1975.
+[13] J. H. Holland, *Adaptation in Natural and Artificial Systems*. Univ. Michigan Press, 1975.
 
-[14] G. Laporte, "The vehicle routing problem: An overview of exact and approximate algorithms," *European Journal of Operational Research*, vol. 59, no. 3, pp. 345–358, 1992.
+[14] G. Laporte, "The vehicle routing problem," *Eur. J. Oper. Res.*, vol. 59, no. 3, pp. 345–358, 1992.
 
-[15] A. Colorni, M. Dorigo, and V. Maniezzo, "Genetic algorithms: A new approach to the traveling salesman problem," in *Proc. 1st Int. Conf. on Parallel Problem Solving from Nature*, Dortmund, Germany, 1991, pp. 443–448.
-
----
-
-*Bài báo được chuẩn bị theo định dạng IEEE Transactions. Tất cả thực nghiệm được thực hiện tại Phòng thí nghiệm Robot, Khoa Kỹ thuật Điện-Điện tử.*
+[15] A. Colorni, M. Dorigo, and V. Maniezzo, "Genetic algorithms for the TSP," in *Proc. PPSN I*, Dortmund, 1991, pp. 443–448.

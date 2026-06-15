@@ -183,7 +183,7 @@ def add_runs_with_inline(paragraph, text):
         elif part.startswith('`') and part.endswith('`'):
             run = paragraph.add_run(part[1:-1])
             run.font.name = 'Consolas'
-            run.font.size = Pt(10)
+            run.font.size = Pt(11)
         elif part.startswith('\\(') and part.endswith('\\)'):
             add_math_runs(paragraph, part[2:-2])
         else:
@@ -206,6 +206,28 @@ def parse_table(lines, start_idx):
     return rows, i
 
 
+def set_two_columns(section, gap_twips=720):
+    """Set a section to 2-column layout. gap_twips: gap between columns in twips (680 ≈ 0.47")."""
+    sectPr = section._sectPr
+    # Remove existing cols
+    for old in sectPr.findall(qn('w:cols')):
+        sectPr.remove(old)
+    cols = OxmlElement('w:cols')
+    cols.set(qn('w:num'), '2')
+    cols.set(qn('w:space'), str(gap_twips))
+    sectPr.append(cols)
+
+
+def set_one_column(section):
+    """Explicitly set section to 1 column."""
+    sectPr = section._sectPr
+    for old in sectPr.findall(qn('w:cols')):
+        sectPr.remove(old)
+    cols = OxmlElement('w:cols')
+    cols.set(qn('w:num'), '1')
+    sectPr.append(cols)
+
+
 def convert():
     with open(SRC, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -213,33 +235,57 @@ def convert():
 
     doc = Document()
 
-    # Page setup: A4 with normal margins
+    # Page setup: A4 with IEEE-like margins
     section = doc.sections[0]
     section.page_height = Cm(29.7)
     section.page_width = Cm(21.0)
-    section.left_margin = Cm(2.0)
-    section.right_margin = Cm(2.0)
-    section.top_margin = Cm(2.0)
-    section.bottom_margin = Cm(2.0)
+    section.left_margin = Cm(1.9)
+    section.right_margin = Cm(1.9)
+    section.top_margin = Cm(1.8)
+    section.bottom_margin = Cm(1.8)
+    set_one_column(section)  # Title + abstract span full width
 
-    # Default font
+    # Default font: Times New Roman 13pt
     style = doc.styles['Normal']
     style.font.name = 'Times New Roman'
-    style.font.size = Pt(11)
+    style.font.size = Pt(13)
     rpr = style.element.get_or_add_rPr()
     rfonts = rpr.find(qn('w:rFonts'))
     if rfonts is None:
         rfonts = OxmlElement('w:rFonts')
         rpr.append(rfonts)
     rfonts.set(qn('w:eastAsia'), 'Times New Roman')
+    # Paragraph spacing
+    style.paragraph_format.space_after = Pt(5)
+    style.paragraph_format.space_before = Pt(0)
+    style.paragraph_format.line_spacing = Pt(15)
 
     i = 0
     in_code_block = False
     code_buffer = []
+    in_two_col = False
 
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
+
+        # Column-break marker: toggles between 1-col and 2-col
+        if stripped == '<!-- columns -->':
+            new_section = doc.add_section()
+            new_section.page_height = Cm(29.7)
+            new_section.page_width = Cm(21.0)
+            new_section.left_margin = Cm(1.9)
+            new_section.right_margin = Cm(1.9)
+            new_section.top_margin = Cm(1.8)
+            new_section.bottom_margin = Cm(1.8)
+            if not in_two_col:
+                set_two_columns(new_section)
+                in_two_col = True
+            else:
+                set_one_column(new_section)
+                in_two_col = False
+            i += 1
+            continue
 
         # Code block toggle
         if stripped.startswith('```'):
@@ -249,7 +295,7 @@ def convert():
                 p.paragraph_format.left_indent = Cm(0.5)
                 run = p.add_run('\n'.join(code_buffer))
                 run.font.name = 'Consolas'
-                run.font.size = Pt(9)
+                run.font.size = Pt(11)
                 code_buffer = []
                 in_code_block = False
             else:
@@ -294,16 +340,21 @@ def convert():
         if stripped.startswith('# '):
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(14)
+            p.paragraph_format.space_after = Pt(8)
             run = p.add_run(stripped[2:])
             run.bold = True
-            run.font.size = Pt(16)
+            run.font.size = Pt(22)
             i += 1
             continue
         if stripped.startswith('## '):
             p = doc.add_paragraph()
-            run = p.add_run(stripped[3:])
+            run = p.add_run(stripped[3:].upper())
             run.bold = True
-            run.font.size = Pt(13)
+            run.font.size = Pt(14)
+            run.font.small_caps = True
+            p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(5)
             i += 1
             continue
         if stripped.startswith('### '):
@@ -311,14 +362,18 @@ def convert():
             run = p.add_run(stripped[4:])
             run.bold = True
             run.italic = True
-            run.font.size = Pt(11.5)
+            run.font.size = Pt(13)
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(4)
             i += 1
             continue
         if stripped.startswith('#### '):
             p = doc.add_paragraph()
             run = p.add_run(stripped[5:])
             run.bold = True
-            run.font.size = Pt(11)
+            run.font.size = Pt(13)
+            p.paragraph_format.space_before = Pt(6)
+            p.paragraph_format.space_after = Pt(3)
             i += 1
             continue
 
@@ -327,6 +382,7 @@ def convert():
             p = doc.add_paragraph()
             run = p.add_run(stripped[2:-2])
             run.bold = True
+            run.italic = True
             i += 1
             continue
 
@@ -372,8 +428,9 @@ def convert():
 
         # Default paragraph
         p = doc.add_paragraph()
-        p.paragraph_format.first_line_indent = Cm(0.5)
+        p.paragraph_format.first_line_indent = Cm(0.4)
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        p.paragraph_format.space_after = Pt(3)
         # Strip surrounding whitespace, preserve inline formatting
         add_runs_with_inline(p, line)
         i += 1
@@ -383,4 +440,9 @@ def convert():
 
 
 if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 2:
+        DST = sys.argv[2]
+    elif len(sys.argv) > 1:
+        SRC = sys.argv[1]
     convert()
